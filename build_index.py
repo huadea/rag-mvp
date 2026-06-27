@@ -50,7 +50,7 @@ def main(file_path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("用法：uv run build_index.py <招标文件.md>")
-        sys.exit(1)
-    main(sys.argv[1])
+    # if len(sys.argv) < 2:
+    #     print("用法：uv run build_index.py <招标文件.md>")
+    #     sys.exit(1)
+    main('D:\\GitOpen\\rag-mvp\\demo.md')
