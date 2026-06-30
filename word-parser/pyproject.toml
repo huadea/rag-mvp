@@ -1,0 +1,11 @@
+[project]
+name = "word-parser"
+version = "0.1.0"
+description = "Word (.docx) 文件解析提取，输出 Markdown 供 RAG 管道消费"
+requires-python = ">=3.12"
+dependencies = [
+    "python-docx>=1.2.0",
+]
+
+[project.scripts]
+word-parser = "cli:main"
