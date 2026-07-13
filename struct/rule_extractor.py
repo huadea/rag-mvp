@@ -64,12 +64,35 @@ def _match_field(field_def: dict, sections: list[dict]) -> dict | None:
             field_def, sections, keyword="分包",
             accept_label="允许", reject_label="不允许",
         )
+    if field_name in ("开标时间与地点", "投标文件递交截止时间与地点"):
+        return _match_time_and_location(field_def, sections)
 
     if not pattern:
         return None
 
-    # 收集所有候选命中，而不是"第一个命中就返回"——无关段落（如邮寄说明的
-    # 脚注）里凑巧出现锚点词+冒号时，会在真正的字段声明之前被错误命中。
+    candidates = _collect_candidates(field_name, anchors, pattern, group_name, sections)
+    if not candidates:
+        return None
+    best = dict(candidates[0])
+    best.pop("_priority")
+    best.pop("_anchor_index")
+    return best
+
+
+def _collect_candidates(
+    field_name: str,
+    anchors: list[str],
+    pattern: str,
+    group_name: str,
+    sections: list[dict],
+) -> list[dict]:
+    """
+    收集所有候选命中并按优先级排序，而不是"第一个命中就返回"——无关段落
+    （如邮寄说明的脚注）里凑巧出现锚点词+冒号时，会在真正的字段声明之前
+    被错误命中。排序：先按章节优先级，同优先级内再按锚点在 anchors 列表
+    里的顺序（越靠前越具体，如"招标人名称"应优先于泛化的"招标人"）。
+    返回的每个候选额外带 `_priority`/`_anchor_index`，调用方用完需自行 pop。
+    """
     candidates: list[dict] = []
     for section in sections:
         text = section["content"]
@@ -100,15 +123,65 @@ def _match_field(field_def: dict, sections: list[dict]) -> dict | None:
                     "_anchor_index": anchor_index,
                 })
 
-    if not candidates:
-        return None
-    # 排序：先按章节优先级，同优先级内再按锚点在 anchors 列表里的顺序
-    # （越靠前越具体，如"招标人名称"应优先于泛化的"招标人"）
     candidates.sort(key=lambda c: (c["_priority"], c["_anchor_index"]))
-    best = candidates[0]
-    best.pop("_priority")
-    best.pop("_anchor_index")
-    return best
+    return candidates
+
+
+_LOCATION_RE = re.compile(r"[:：]\s*(.+)")
+
+
+def _match_time_and_location(field_def: dict, sections: list[dict]) -> dict | None:
+    """
+    "开标时间与地点""投标文件递交截止时间与地点"这类字段在源文档里通常是
+    两个相邻但独立的条款（如"（一）...时间：xxx"和"（二）地点：xxx"），
+    时间锚点的正则只能捕获同一行内的文本，永远抓不到下一行的地点。
+    这里先用通用逻辑抓时间，再在同一章节里找紧随其后的"地点"行拼接上去。
+    """
+    field_name = field_def["field_name"]
+    anchors = field_def["anchors"]
+    pattern = field_def["pattern"]
+    group_name = field_def.get("group", "")
+
+    time_candidates = _collect_candidates(field_name, anchors, pattern, group_name, sections)
+    if not time_candidates:
+        return None
+    time_best = time_candidates[0]
+    time_section = time_best["source_section"]
+    time_value = time_best["field_value"]
+
+    location_value = None
+    location_line = None
+    for section in sections:
+        if section["title"] != time_section:
+            continue
+        for line in section["content"].splitlines():
+            if "地点" not in line:
+                continue
+            idx = line.find("地点")
+            window = line[idx: idx + len("地点") + 100]
+            m = _LOCATION_RE.search(window)
+            if m:
+                location_value = _clean(m.group(1))
+                location_line = line.strip()
+                break
+        break
+
+    if location_value:
+        field_value = f"{time_value}；地点：{location_value}"
+        source_text = f"{time_best['source_text']}；{location_line}"
+    else:
+        field_value = time_value
+        source_text = time_best["source_text"]
+
+    return {
+        "field_name": field_name,
+        "field_value": field_value,
+        "source_section": time_section,
+        "source_text": source_text,
+        "confidence": "高",
+        "extraction_method": "rule",
+        "group_name": group_name,
+    }
 
 
 def _match_bid_packages(field_def: dict, sections: list[dict]) -> dict | None:
