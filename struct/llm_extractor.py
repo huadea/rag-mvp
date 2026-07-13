@@ -52,6 +52,21 @@ _SYNTHESIZE_PROMPT = """你是一个信息归纳助手，专门基于招标文�
   "source_text": "参考的原文片段 或 null"
 }"""
 
+_ARBITRATE_PROMPT = """你是一个信息仲裁助手。你会收到若干个候选片段，其中最多有一个
+是指定字段的正确取值，其余可能是无关的干扰内容（如脚注、举例、其他条款）。
+
+规则：
+1. 只能从给定候选中判断，不得使用候选之外的信息，也不得编造。
+2. field_value 是从选中候选里提炼出的简洁答案（不是整段照抄），
+   但不能包含候选原文之外的内容。
+3. matched_candidate 是你选中的候选编号（从1开始的整数）；如果所有候选
+   都不是该字段的有效答案，field_value 和 matched_candidate 都返回 null。
+4. 必须返回合法的 JSON，格式如下（不要加任何额外文字）：
+{
+  "field_value": "提炼后的答案 或 null",
+  "matched_candidate": 选中的候选编号（整数）或 null
+}"""
+
 # 优先装入 LLM 上下文/优先信任的章节。文档标题可能带 Markdown 加粗符号或
 # PDF 转换带来的逐字空格（如"第一章  招 标 公 告"），比较前需要归一化。
 _PRIORITY_TITLES = ["投标须知前附表", "招标公告", "项目基本情况"]
@@ -106,7 +121,7 @@ def _extract_one(field_def: dict, context: str, full_text: str) -> dict:
         raw = resp.choices[0].message.content.strip()
         data = _parse_json(raw)
     except Exception as e:
-        return _null_record(field_name, group_name, f"LLM调用失败: {e}")
+        return null_record(field_name, group_name, f"LLM调用失败: {e}")
 
     field_value = data.get("field_value")
     source_section = data.get("source_section")
@@ -131,6 +146,67 @@ def _extract_one(field_def: dict, context: str, full_text: str) -> dict:
     }
 
 
+def arbitrate(field_def: dict, candidates: list[dict]) -> dict:
+    """
+    给定规则收集到的候选段落列表（每个候选已经是"锚点/同义词所在段落 +
+    前后扩展"的完整原文），一次调用 LLM，让它从候选里判断哪个是正确答案，
+    而不是像规则那样靠启发式排序硬选一个——候选本身已经是真实原文摘录，
+    LLM 只做"选择题"而不是自由抽取，幻觉空间比整章节自由问答小得多。
+    """
+    field_name = field_def["field_name"]
+    group_name = field_def.get("group", "")
+
+    candidate_block = "\n\n".join(
+        f"候选{i + 1}（来源章节：{c['source_section']}）：\n{c['source_text']}"
+        for i, c in enumerate(candidates)
+    )
+    user_prompt = f"""请判断以下候选片段中，哪一个是【{field_name}】字段的正确取值。
+
+{candidate_block}
+
+返回 JSON，字段：field_value、matched_candidate。"""
+
+    try:
+        resp = _get_client().chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": _ARBITRATE_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+        )
+        raw = resp.choices[0].message.content.strip()
+        data = _parse_json(raw)
+    except Exception as e:
+        return null_record(field_name, group_name, f"LLM调用失败: {e}")
+
+    field_value = data.get("field_value")
+    matched_index = data.get("matched_candidate")
+
+    source_section = None
+    source_text = None
+    if isinstance(matched_index, int) and 1 <= matched_index <= len(candidates):
+        # 来源以程序自己保存的候选原文为准，不用模型自己复述的内容，
+        # 避免"答案本身没编，但引用的来源被模型顺手改写了"这种问题。
+        chosen = candidates[matched_index - 1]
+        source_section = chosen["source_section"]
+        source_text = chosen["source_text"]
+    else:
+        field_value = None
+
+    confidence = "高" if field_value and source_text else "低"
+
+    return {
+        "field_name": field_name,
+        "field_value": field_value,
+        "source_section": source_section,
+        "source_text": source_text,
+        "confidence": confidence,
+        "extraction_method": "llm_arbitrate",
+        "group_name": group_name,
+    }
+
+
 def _parse_json(raw: str) -> dict:
     # 去掉可能的 markdown 代码块包裹
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -138,7 +214,7 @@ def _parse_json(raw: str) -> dict:
     return json.loads(raw)
 
 
-def _null_record(field_name: str, group_name: str, reason: str = "") -> dict:
+def null_record(field_name: str, group_name: str, reason: str = "") -> dict:
     return {
         "field_name": field_name,
         "field_value": None,

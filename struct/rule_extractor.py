@@ -1,10 +1,21 @@
 """
-规则提取：对每个字段用锚点词 + 正则在章节列表中匹配。
-返回：(命中记录列表, 未命中字段定义列表)
+规则提取。字段分三类，处理方式不同：
+
+- 结构化表格/布尔/时间地点字段（标段/包号划分、投标保证金、招标控制价、
+  是否接受联合体投标、是否允许分包、开标时间与地点、投标文件递交截止
+  时间与地点）：有固定格式可以精确解析，直接产出确定性结果，不经过
+  候选收集，也不需要 LLM。
+
+- 归纳型字段（synthesis）：不在这里处理，交给 llm_extractor 直接总结。
+
+- 其余通用单值字段：只做"候选收集"——锚点命中就摘出候选段落（含相邻
+  1~2 行扩展），锚点未命中则换 query_keywords 当同义词再搜一轮；
+  收集到的候选不在这里挑答案，而是交给 llm_extractor 做仲裁。
+  两轮都没有候选，直接判定为空，不需要调用 LLM。
 """
 
 import re
-from schema import FIELDS
+from schema import FIELDS, FIELD_MAP
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -33,71 +44,156 @@ def _is_priority_section(title: str) -> bool:
     return any(p in normalized for p in _PRIORITY_TITLES)
 
 
-def extract(sections: list[dict]) -> tuple[list[dict], list[dict]]:
+# 有专用确定性解析器、不走"候选收集+LLM仲裁"流程的字段
+_DETERMINISTIC_FIELDS = {
+    "标段/包号划分",
+    "投标保证金",
+    "招标控制价",
+    "是否接受联合体投标",
+    "是否允许分包",
+    "开标时间与地点",
+    "投标文件递交截止时间与地点",
+}
+
+
+def extract(sections: list[dict]) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
+    """
+    返回 (确定性命中记录, {字段名: 候选列表}, 两轮都没候选的字段定义列表)。
+    synthesis 类型字段不在这里处理，调用方需自行从 FIELDS 里过滤出来交给
+    llm_extractor 做归纳。
+    """
     hit_records: list[dict] = []
-    miss_fields: list[dict] = []
+    candidates_by_field: dict[str, list[dict]] = {}
+    empty_fields: list[dict] = []
 
     for field_def in FIELDS:
-        record = _match_field(field_def, sections)
-        if record:
-            hit_records.append(record)
+        name = field_def["field_name"]
+
+        if field_def.get("field_type") == "synthesis":
+            continue
+
+        if name in _DETERMINISTIC_FIELDS:
+            record = _match_deterministic(field_def, sections)
+            if record:
+                hit_records.append(record)
+            else:
+                empty_fields.append(field_def)
+            continue
+
+        candidates = collect_candidates_for_field(field_def, sections)
+        if candidates:
+            candidates_by_field[name] = candidates
         else:
-            miss_fields.append(field_def)
+            empty_fields.append(field_def)
 
-    return hit_records, miss_fields
+    return hit_records, candidates_by_field, empty_fields
 
 
-def _match_field(field_def: dict, sections: list[dict]) -> dict | None:
-    field_name = field_def["field_name"]
-    anchors = field_def["anchors"]
-    pattern = field_def["pattern"]
-    group_name = field_def.get("group", "")
-
-    if field_name == "标段/包号划分":
+def _match_deterministic(field_def: dict, sections: list[dict]) -> dict | None:
+    name = field_def["field_name"]
+    if name == "标段/包号划分":
         return _match_bid_packages(field_def, sections)
-    if field_name == "投标保证金":
+    if name == "投标保证金":
         return _match_deposit_by_package(field_def, sections)
-    if field_name == "招标控制价":
+    if name == "招标控制价":
         return _match_control_price(field_def, sections)
-    if field_name == "是否接受联合体投标":
+    if name == "是否接受联合体投标":
         return _match_boolean(
             field_def, sections, keyword="联合体",
             accept_label="接受", reject_label="不接受",
         )
-    if field_name == "是否允许分包":
+    if name == "是否允许分包":
         return _match_boolean(
             field_def, sections, keyword="分包",
             accept_label="允许", reject_label="不允许",
         )
-    if field_name in ("开标时间与地点", "投标文件递交截止时间与地点"):
+    if name in ("开标时间与地点", "投标文件递交截止时间与地点"):
         return _match_time_and_location(field_def, sections)
-
-    if not pattern:
-        return None
-
-    candidates = _collect_candidates(field_name, anchors, pattern, group_name, sections)
-    if not candidates:
-        return None
-    best = dict(candidates[0])
-    best.pop("_priority")
-    best.pop("_anchor_index")
-    return best
+    return None
 
 
-def _collect_candidates(
+# ── 候选收集（供 LLM 仲裁使用）───────────────────────────────────────
+
+_MAX_CANDIDATES = 6
+
+
+def collect_candidates_for_field(field_def: dict, sections: list[dict]) -> list[dict]:
+    """
+    候选粒度是"段落"：锚点/关键词所在行 + 前后各扩 1 行，而不是单行内的
+    正则捕获值——这样"字段名和值分两行写"（如"招标人名称"和值同行，
+    "地点"另起一行）也能被同一个候选段落覆盖到，不用为每种结构再写
+    专用函数。最终不在这里挑答案，只负责把候选交给 llm_extractor.arbitrate。
+    """
+    field_name = field_def["field_name"]
+    group_name = field_def.get("group", "")
+    anchors = [a for a in field_def.get("anchors", []) if a]
+
+    candidates = _collect_paragraph_candidates(field_name, group_name, anchors, sections)
+    if candidates:
+        return candidates[:_MAX_CANDIDATES]
+
+    # 锚点一个都没命中，换 query_keywords 当同义词再搜一轮
+    synonyms = [kw for kw in field_def.get("query_keywords", []) if kw and kw not in anchors]
+    if not synonyms:
+        return []
+    candidates = _collect_paragraph_candidates(
+        field_name, group_name, synonyms, sections, keyword_index_offset=len(anchors),
+    )
+    return candidates[:_MAX_CANDIDATES]
+
+
+def _collect_paragraph_candidates(
+    field_name: str,
+    group_name: str,
+    keywords: list[str],
+    sections: list[dict],
+    keyword_index_offset: int = 0,
+) -> list[dict]:
+    candidates: list[dict] = []
+    seen_texts: set[str] = set()
+
+    for section in sections:
+        # 只保留非空行参与"前后扩 1 行"，否则遇到空行会白白扩到一个空
+        # 位置，抓不到隔着一个空行的下一句真正的值（比如"1. 评标方法"
+        # 后面空一行才是"本次评标采用综合评分法"）。
+        non_blank = [line for line in section["content"].splitlines() if line.strip()]
+        section_priority = 0 if _is_priority_section(section["title"]) else 1
+        for keyword_index, keyword in enumerate(keywords):
+            for i, line in enumerate(non_blank):
+                if keyword not in line:
+                    continue
+                start = max(0, i - 1)
+                end = min(len(non_blank), i + 2)
+                paragraph_lines = [_clean(l) for l in non_blank[start:end]]
+                paragraph = "\n".join(pl for pl in paragraph_lines if pl)
+                if not paragraph or paragraph in seen_texts:
+                    continue
+                seen_texts.add(paragraph)
+                candidates.append({
+                    "field_name": field_name,
+                    "group_name": group_name,
+                    "source_section": section["title"],
+                    "source_text": paragraph,
+                    "_priority": section_priority,
+                    "_keyword_index": keyword_index_offset + keyword_index,
+                })
+
+    candidates.sort(key=lambda c: (c["_priority"], c["_keyword_index"]))
+    for c in candidates:
+        c.pop("_priority", None)
+        c.pop("_keyword_index", None)
+    return candidates
+
+
+# ── 内部专用：时间+地点解析仍需要精确捕获日期数值，保留正则窗口版 ──────
+
+def _collect_pattern_candidates(
     field_name: str,
     anchors: list[str],
     pattern: str,
     group_name: str,
     sections: list[dict],
 ) -> list[dict]:
-    """
-    收集所有候选命中并按优先级排序，而不是"第一个命中就返回"——无关段落
-    （如邮寄说明的脚注）里凑巧出现锚点词+冒号时，会在真正的字段声明之前
-    被错误命中。排序：先按章节优先级，同优先级内再按锚点在 anchors 列表
-    里的顺序（越靠前越具体，如"招标人名称"应优先于泛化的"招标人"）。
-    返回的每个候选额外带 `_priority`/`_anchor_index`，调用方用完需自行 pop。
-    """
     candidates: list[dict] = []
     for section in sections:
         text = section["content"]
@@ -106,13 +202,8 @@ def _collect_candidates(
             for line in text.splitlines():
                 if anchor not in line:
                     continue
-                # 只在锚点词之后的一小段窗口内找值，避免匹配到行内更靠后、
-                # 与锚点无关的冒号（例如整段正文里出现的其他"字段：值"）
                 idx = line.find(anchor)
                 window = line[idx: idx + len(anchor) + 60]
-                # 大段 HTML 表格常整行拼成一条"line"，窗口容易跨过当前
-                # 单元格边界（</p></td>...）把下一格无关内容也吞进来，
-                # 先在边界处截断，避免值里混入邻格文本。
                 boundary = window.find("</p>")
                 if boundary != -1:
                     window = window[:boundary]
@@ -139,6 +230,7 @@ def _collect_candidates(
 
 
 _LOCATION_RE = re.compile(r"[:：]\s*(.+)")
+_TIME_PATTERN = r"(\d{4}年\d{1,2}月\d{1,2}日[^\n]*)"
 
 
 def _match_time_and_location(field_def: dict, sections: list[dict]) -> dict | None:
@@ -150,10 +242,9 @@ def _match_time_and_location(field_def: dict, sections: list[dict]) -> dict | No
     """
     field_name = field_def["field_name"]
     anchors = field_def["anchors"]
-    pattern = field_def["pattern"]
     group_name = field_def.get("group", "")
 
-    time_candidates = _collect_candidates(field_name, anchors, pattern, group_name, sections)
+    time_candidates = _collect_pattern_candidates(field_name, anchors, _TIME_PATTERN, group_name, sections)
     if not time_candidates:
         return None
     time_best = time_candidates[0]
