@@ -25,7 +25,7 @@ def _get_client() -> OpenAI:
     return _client
 
 
-_SYSTEM_PROMPT = """你是一个信息提取助手，专门从招标文件中提取指定字段。
+_EXTRACT_PROMPT = """你是一个信息提取助手，专门从招标文件中提取指定字段。
 
 规则：
 1. 只从给定的文档原文中提取，不得推断或编造。
@@ -37,6 +37,29 @@ _SYSTEM_PROMPT = """你是一个信息提取助手，专门从招标文件中提
   "source_section": "来源章节标题 或 null",
   "source_text": "原文片段 或 null"
 }"""
+
+_SYNTHESIZE_PROMPT = """你是一个信息归纳助手，专门基于招标文件原文对指定字段做简要总结。
+
+规则：
+1. 只能基于给定的文档原文归纳，禁止编造原文中不存在的具体数字、金额、日期等事实性内容。
+2. 归纳结果不超过150字。
+3. source_text 必须列出你归纳时参考的1-2句原文依据（可以是非连续的多处摘录，用"；"分隔）。
+4. 找不到任何相关内容时，field_value 必须返回 null。
+5. 必须返回合法的 JSON，格式如下（不要加任何额外文字）：
+{
+  "field_value": "归纳后的内容 或 null",
+  "source_section": "来源章节标题 或 null",
+  "source_text": "参考的原文片段 或 null"
+}"""
+
+# 优先装入 LLM 上下文/优先信任的章节。文档标题可能带 Markdown 加粗符号或
+# PDF 转换带来的逐字空格（如"第一章  招 标 公 告"），比较前需要归一化。
+_PRIORITY_TITLES = ["投标须知前附表", "招标公告", "项目基本情况"]
+
+
+def _is_priority_section(title: str) -> bool:
+    normalized = title.replace(" ", "").replace("　", "")
+    return any(p in normalized for p in _PRIORITY_TITLES)
 
 
 def extract(
@@ -61,6 +84,7 @@ def extract(
 def _extract_one(field_def: dict, context: str, full_text: str) -> dict:
     field_name = field_def["field_name"]
     group_name = field_def.get("group", "")
+    system_prompt = _SYNTHESIZE_PROMPT if field_def.get("field_type") == "synthesis" else _EXTRACT_PROMPT
 
     user_prompt = f"""请从以下招标文件中提取字段：【{field_name}】
 
@@ -73,7 +97,7 @@ def _extract_one(field_def: dict, context: str, full_text: str) -> dict:
         resp = _get_client().chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0,
@@ -129,13 +153,15 @@ def _build_context(sections: list[dict], full_text: str) -> str:
     # MVP 阶段直接用全文，控制在 8000 字以内避免超 token
     if len(full_text) <= 8000:
         return full_text
-    # 超长时拼章节标题 + 内容（截断）
+    # 超长时按优先章节排序后拼接（优先章节如"投标须知前附表"是大多数
+    # 基础字段的真实来源，必须优先塞进预算，而不是按文档物理顺序）
+    ordered = sorted(sections, key=lambda s: 0 if _is_priority_section(s["title"]) else 1)
     parts = []
     total = 0
-    for s in sections:
+    for s in ordered:
         chunk = f"## {s['title']}\n{s['content']}"
         if total + len(chunk) > 8000:
-            break
+            continue  # 这章太大放不下，跳过但不终止，后面更小的章节仍有机会塞进去
         parts.append(chunk)
         total += len(chunk)
     return "\n\n".join(parts)

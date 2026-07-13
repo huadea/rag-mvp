@@ -20,6 +20,15 @@ _BID_ROW_RE = re.compile(
     r"<td><p>([^<]+)</p></td><td><p>([\d,.]+)</p></td></tr>"
 )
 
+# 优先信任的章节：文档标题可能带 Markdown 加粗符号或 PDF 转换带来的逐字
+# 空格（如"第一章  招 标 公 告"），比较前需要归一化，且用子串而非精确相等。
+_PRIORITY_TITLES = ["投标须知前附表", "招标公告", "项目基本情况"]
+
+
+def _is_priority_section(title: str) -> bool:
+    normalized = title.replace(" ", "").replace("　", "")
+    return any(p in normalized for p in _PRIORITY_TITLES)
+
 
 def extract(sections: list[dict]) -> tuple[list[dict], list[dict]]:
     hit_records: list[dict] = []
@@ -43,6 +52,8 @@ def _match_field(field_def: dict, sections: list[dict]) -> dict | None:
 
     if field_name == "标段/包号划分":
         return _match_bid_packages(field_def, sections)
+    if field_name == "投标保证金":
+        return _match_deposit_by_package(field_def, sections)
     if field_name == "是否接受联合体投标":
         return _match_boolean(
             field_def, sections, keyword="联合体",
@@ -54,36 +65,50 @@ def _match_field(field_def: dict, sections: list[dict]) -> dict | None:
             accept_label="允许", reject_label="不允许",
         )
 
+    if not pattern:
+        return None
+
+    # 收集所有候选命中，而不是"第一个命中就返回"——无关段落（如邮寄说明的
+    # 脚注）里凑巧出现锚点词+冒号时，会在真正的字段声明之前被错误命中。
+    candidates: list[dict] = []
     for section in sections:
         text = section["content"]
-        for anchor in anchors:
-            # 找到锚点词所在的行
+        section_priority = 0 if _is_priority_section(section["title"]) else 1
+        for anchor_index, anchor in enumerate(anchors):
             for line in text.splitlines():
-                if anchor in line:
-                    if pattern:
-                        # 只在锚点词之后的一小段窗口内找值，避免匹配到行内更靠后、
-                        # 与锚点无关的冒号（例如整段正文里出现的其他"字段：值"）
-                        idx = line.find(anchor)
-                        window = line[idx: idx + len(anchor) + 60]
-                        m = re.search(pattern, window)
-                        if m:
-                            value = _clean(m.group(1))
-                            if not value:
-                                continue
-                            # 过滤掉明显过长的匹配（可能是整段文字而非字段值）
-                            if len(value) > 200:
-                                continue
-                            return {
-                                "field_name": field_name,
-                                "field_value": value,
-                                "source_section": section["title"],
-                                "source_text": line.strip(),
-                                "confidence": "高",
-                                "extraction_method": "rule",
-                                "group_name": group_name,
-                            }
+                if anchor not in line:
+                    continue
+                # 只在锚点词之后的一小段窗口内找值，避免匹配到行内更靠后、
+                # 与锚点无关的冒号（例如整段正文里出现的其他"字段：值"）
+                idx = line.find(anchor)
+                window = line[idx: idx + len(anchor) + 60]
+                m = re.search(pattern, window)
+                if not m:
+                    continue
+                value = _clean(m.group(1))
+                if not value or len(value) > 200:
+                    continue
+                candidates.append({
+                    "field_name": field_name,
+                    "field_value": value,
+                    "source_section": section["title"],
+                    "source_text": line.strip(),
+                    "confidence": "高",
+                    "extraction_method": "rule",
+                    "group_name": group_name,
+                    "_priority": section_priority,
+                    "_anchor_index": anchor_index,
+                })
 
-    return None
+    if not candidates:
+        return None
+    # 排序：先按章节优先级，同优先级内再按锚点在 anchors 列表里的顺序
+    # （越靠前越具体，如"招标人名称"应优先于泛化的"招标人"）
+    candidates.sort(key=lambda c: (c["_priority"], c["_anchor_index"]))
+    best = candidates[0]
+    best.pop("_priority")
+    best.pop("_anchor_index")
+    return best
 
 
 def _match_bid_packages(field_def: dict, sections: list[dict]) -> dict | None:
@@ -96,7 +121,7 @@ def _match_bid_packages(field_def: dict, sections: list[dict]) -> dict | None:
         if not rows:
             continue
 
-        items = [f"标包{no}{name}{qty}{price}元" for no, name, qty, price in rows]
+        items = [f"标包{no}｜{name}｜{qty}｜{price}元" for no, name, qty, price in rows]
         return {
             "field_name": "标段/包号划分",
             "field_value": "\n".join(items),
@@ -109,6 +134,31 @@ def _match_bid_packages(field_def: dict, sections: list[dict]) -> dict | None:
             "group_name": group_name,
         }
 
+    return None
+
+
+_DEPOSIT_RE = re.compile(r"标包(\d+)[：:]\s*[￥¥]\s*([\d,]+\.?\d*)")
+
+
+def _match_deposit_by_package(field_def: dict, sections: list[dict]) -> dict | None:
+    group_name = field_def.get("group", "")
+    for section in sections:
+        if "投标须知前附表" not in section["title"] and "投标保证金" not in section["content"]:
+            continue
+        text = section["content"]
+        rows = _DEPOSIT_RE.findall(text)
+        if not rows:
+            continue
+        items = [f"标包{no}｜¥{amount}" for no, amount in rows]
+        return {
+            "field_name": "投标保证金",
+            "field_value": "\n".join(items),
+            "source_section": section["title"],
+            "source_text": "；".join(f"标包{no}：¥{amount}" for no, amount in rows),
+            "confidence": "高",
+            "extraction_method": "rule",
+            "group_name": group_name,
+        }
     return None
 
 

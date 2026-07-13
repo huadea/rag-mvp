@@ -6,6 +6,7 @@
 FIELDS = [
     {
         "field_name": "项目名称",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["项目名称", "项目全称"],
         "pattern": r"[:：]\s*(.+)",
@@ -13,6 +14,7 @@ FIELDS = [
     },
     {
         "field_name": "招标编号",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["招标编号", "项目编号", "招标文件编号"],
         "pattern": r"[:：]\s*([A-Za-z0-9\-]+)",
@@ -20,6 +22,7 @@ FIELDS = [
     },
     {
         "field_name": "委托代理编号",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["委托代理编号", "代理编号"],
         "pattern": r"[:：]\s*(.+)",
@@ -27,6 +30,7 @@ FIELDS = [
     },
     {
         "field_name": "项目概况",
+        "field_type": "synthesis",
         "group": "项目基础信息",
         "anchors": ["项目概况", "项目简介"],
         "pattern": r"[:：]\s*(.+)",
@@ -34,13 +38,15 @@ FIELDS = [
     },
     {
         "field_name": "招标人/采购人",
+        "field_type": "single",
         "group": "项目基础信息",
-        "anchors": ["招标人/采购人", "招标人", "采购人"],
+        "anchors": ["招标人/采购人", "招标人名称", "招标人", "采购人"],
         "pattern": r"[:：]\s*(.+)",
         "query_keywords": ["招标人", "采购人", "招标人是谁", "采购人是谁"],
     },
     {
         "field_name": "资金来源及落实情况",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["资金来源及落实情况", "资金来源"],
         "pattern": r"[:：]\s*(.+)",
@@ -48,6 +54,7 @@ FIELDS = [
     },
     {
         "field_name": "标段/包号划分",
+        "field_type": "table",
         "group": "项目基础信息",
         "anchors": ["标段/包号划分", "标包划分", "标段划分"],
         "pattern": None,  # 表格解析，逻辑在 rule_extractor 处理
@@ -55,6 +62,7 @@ FIELDS = [
     },
     {
         "field_name": "投标文件递交截止时间与地点",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["投标文件递交截止时间", "递交截止时间", "投标截止时间"],
         "pattern": r"(\d{4}年\d{1,2}月\d{1,2}日[^\n]*)",
@@ -62,6 +70,7 @@ FIELDS = [
     },
     {
         "field_name": "开标时间与地点",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["开标时间"],
         "pattern": r"(\d{4}年\d{1,2}月\d{1,2}日[^\n]*)",
@@ -69,6 +78,7 @@ FIELDS = [
     },
     {
         "field_name": "投标有效期",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["投标有效期"],
         "pattern": r"[:：]\s*(.+)",
@@ -76,6 +86,7 @@ FIELDS = [
     },
     {
         "field_name": "投标保证金",
+        "field_type": "table",
         "group": "项目基础信息",
         "anchors": ["投标保证金"],
         "pattern": r"[:：]\s*(.+)",
@@ -83,6 +94,7 @@ FIELDS = [
     },
     {
         "field_name": "履约保证金",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["履约保证金"],
         "pattern": r"[:：]\s*(.+)",
@@ -90,6 +102,7 @@ FIELDS = [
     },
     {
         "field_name": "现场踏勘/答疑会",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["现场踏勘", "踏勘现场", "答疑会"],
         "pattern": r"[:：]\s*(.+)",
@@ -97,6 +110,7 @@ FIELDS = [
     },
     {
         "field_name": "采购方式",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["采购方式", "招标方式"],
         "pattern": r"[:：]\s*(.+)",
@@ -104,6 +118,7 @@ FIELDS = [
     },
     {
         "field_name": "招标范围",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["招标范围", "采购范围"],
         "pattern": r"[:：]\s*(.+)",
@@ -111,6 +126,7 @@ FIELDS = [
     },
     {
         "field_name": "招标控制价",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["招标控制价", "最高限价合计", "预算金额"],
         "pattern": r"[:：]?\s*([\d,.]+\s*(?:万元|元|人民币)?)",
@@ -118,6 +134,7 @@ FIELDS = [
     },
     {
         "field_name": "投标竞争下浮率",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["投标竞争下浮率", "下浮率"],
         "pattern": r"[:：]\s*(.+)",
@@ -125,6 +142,7 @@ FIELDS = [
     },
     {
         "field_name": "是否接受联合体投标",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["联合体投标", "联合体"],
         "pattern": None,  # 布尔判断，逻辑在 rule_extractor 处理
@@ -132,6 +150,7 @@ FIELDS = [
     },
     {
         "field_name": "是否允许分包",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["分包"],
         "pattern": None,  # 布尔判断，逻辑在 rule_extractor 处理
@@ -139,6 +158,7 @@ FIELDS = [
     },
     {
         "field_name": "评标方法",
+        "field_type": "single",
         "group": "项目基础信息",
         "anchors": ["评标方法"],
         "pattern": r"[:：]\s*(.+)",
