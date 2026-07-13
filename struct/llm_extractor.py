@@ -71,10 +71,11 @@ def extract(
         return []
 
     records: list[dict] = []
-    # 把章节拼成带标题的上下文，优先使用全文（MVP 阶段文档不大）
-    context = _build_context(sections, full_text)
-
     for field_def in miss_fields:
+        # 按字段单独装填上下文：优先塞入真正包含该字段锚点词的章节，而不是
+        # 所有字段共用一份通用上下文——通用上下文在长文档里会被挤爆，导致
+        # 锚点词明明在文档中出现过、却因为没被塞进预算而始终提取不到。
+        context = _build_context(field_def, sections, full_text)
         record = _extract_one(field_def, context, full_text)
         records.append(record)
 
@@ -149,13 +150,24 @@ def _null_record(field_name: str, group_name: str, reason: str = "") -> dict:
     }
 
 
-def _build_context(sections: list[dict], full_text: str) -> str:
+def _build_context(field_def: dict, sections: list[dict], full_text: str) -> str:
     # MVP 阶段直接用全文，控制在 8000 字以内避免超 token
     if len(full_text) <= 8000:
         return full_text
-    # 超长时按优先章节排序后拼接（优先章节如"投标须知前附表"是大多数
-    # 基础字段的真实来源，必须优先塞进预算，而不是按文档物理顺序）
-    ordered = sorted(sections, key=lambda s: 0 if _is_priority_section(s["title"]) else 1)
+
+    anchors = [a for a in field_def.get("anchors", []) if a]
+
+    def _section_priority(s: dict) -> int:
+        # 0：章节内容里真的出现了该字段的锚点词，最可能是答案所在地
+        # 1：通用的高信任章节（投标须知前附表等）
+        # 2：其余章节，按文档原有顺序垫底（stable sort 保序）
+        if any(a in s["content"] for a in anchors):
+            return 0
+        if _is_priority_section(s["title"]):
+            return 1
+        return 2
+
+    ordered = sorted(sections, key=_section_priority)
     parts = []
     total = 0
     for s in ordered:

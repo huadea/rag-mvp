@@ -19,6 +19,9 @@ _BID_ROW_RE = re.compile(
     r"<tr><td><p>(\d+)</p></td><td><p>([^<]+)</p></td>"
     r"<td><p>([^<]+)</p></td><td><p>([\d,.]+)</p></td></tr>"
 )
+_BID_TOTAL_RE = re.compile(
+    r"<tr><td colspan=\"3\"><p>合计</p></td><td><p>([\d,.]+)</p></td></tr>"
+)
 
 # 优先信任的章节：文档标题可能带 Markdown 加粗符号或 PDF 转换带来的逐字
 # 空格（如"第一章  招 标 公 告"），比较前需要归一化，且用子串而非精确相等。
@@ -54,6 +57,8 @@ def _match_field(field_def: dict, sections: list[dict]) -> dict | None:
         return _match_bid_packages(field_def, sections)
     if field_name == "投标保证金":
         return _match_deposit_by_package(field_def, sections)
+    if field_name == "招标控制价":
+        return _match_control_price(field_def, sections)
     if field_name == "是否接受联合体投标":
         return _match_boolean(
             field_def, sections, keyword="联合体",
@@ -105,6 +110,12 @@ def _collect_candidates(
                 # 与锚点无关的冒号（例如整段正文里出现的其他"字段：值"）
                 idx = line.find(anchor)
                 window = line[idx: idx + len(anchor) + 60]
+                # 大段 HTML 表格常整行拼成一条"line"，窗口容易跨过当前
+                # 单元格边界（</p></td>...）把下一格无关内容也吞进来，
+                # 先在边界处截断，避免值里混入邻格文本。
+                boundary = window.find("</p>")
+                if boundary != -1:
+                    window = window[:boundary]
                 m = re.search(pattern, window)
                 if not m:
                     continue
@@ -207,6 +218,32 @@ def _match_bid_packages(field_def: dict, sections: list[dict]) -> dict | None:
             "group_name": group_name,
         }
 
+    return None
+
+
+def _match_control_price(field_def: dict, sections: list[dict]) -> dict | None:
+    """
+    文档里往往没有"招标控制价"这个字面词，只在标包表格的"合计"行给出总额
+    （术语等价于"招标控制价"）。复用标包表格定位逻辑，直接取合计行的值。
+    """
+    group_name = field_def.get("group", "")
+    for section in sections:
+        text = section["content"]
+        if "标包号" not in text or "最高限价" not in text:
+            continue
+        m = _BID_TOTAL_RE.search(text)
+        if not m:
+            continue
+        value = f"合计{m.group(1)}元"
+        return {
+            "field_name": "招标控制价",
+            "field_value": value,
+            "source_section": section["title"],
+            "source_text": m.group(0),
+            "confidence": "高",
+            "extraction_method": "rule",
+            "group_name": group_name,
+        }
     return None
 
 
