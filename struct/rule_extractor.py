@@ -142,6 +142,24 @@ def collect_candidates_for_field(field_def: dict, sections: list[dict]) -> list[
     return candidates[:_MAX_CANDIDATES]
 
 
+def collect_candidates_with_keywords(
+    field_def: dict,
+    sections: list[dict],
+    keywords: list[str],
+) -> list[dict]:
+    """
+    用调用方给定的关键词列表（如 LLM 现场生成的同义词）再收集一轮候选。
+    供"锚点 + 预置同义词都未命中"时的第三轮兜底使用。
+    """
+    keywords = [kw for kw in keywords if kw]
+    if not keywords:
+        return []
+    candidates = _collect_paragraph_candidates(
+        field_def["field_name"], field_def.get("group", ""), keywords, sections,
+    )
+    return candidates[:_MAX_CANDIDATES]
+
+
 def _collect_paragraph_candidates(
     field_name: str,
     group_name: str,

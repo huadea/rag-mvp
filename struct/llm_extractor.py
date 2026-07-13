@@ -67,6 +67,20 @@ _ARBITRATE_PROMPT = """你是一个信息仲裁助手。你会收到若干个候
   "matched_candidate": 选中的候选编号（整数）或 null
 }"""
 
+_SYNONYM_PROMPT = """你是中文招标文件的信息检索助手。给定一个要提取的字段名，以及
+已经在文档里搜索过、但都没有命中的关键词，请再想出一批新的同义表述/相关关键词，
+用于在同一份招标文件全文里重新搜索这个字段的内容。
+
+规则：
+1. 不要重复给出的"已尝试关键词"（含其同义变体）。
+2. 关键词要具体、有实际可能出现在招标文件正文里，不要给"信息""内容"这类过于宽泛、
+   几乎能匹配任何句子的词。
+3. 可以从"这个字段在招标文件里通常会怎么表述"的角度联想（如"采购方式"字段，招标
+   文件里常见的实际表述可能是"公开招标""邀请招标""竞争性谈判"等具体招标方式名称，
+   而不是"采购方式"这个抽象词本身）。
+4. 最少给 3 个，最多给 8 个。
+5. 只返回 JSON 数组，不要任何额外文字，格式：["词1", "词2", ...]"""
+
 # 优先装入 LLM 上下文/优先信任的章节。文档标题可能带 Markdown 加粗符号或
 # PDF 转换带来的逐字空格（如"第一章  招 标 公 告"），比较前需要归一化。
 _PRIORITY_TITLES = ["投标须知前附表", "招标公告", "项目基本情况"]
@@ -144,6 +158,41 @@ def _extract_one(field_def: dict, context: str, full_text: str) -> dict:
         "extraction_method": "llm",
         "group_name": group_name,
     }
+
+
+def generate_synonyms(field_def: dict, tried_keywords: list[str]) -> list[str]:
+    """
+    锚点词和预置的 query_keywords 都没在文档里搜到候选时，调用 LLM 现场
+    生成一批新的同义词/相关关键词，用于再搜一轮——解决"字段要的信息，
+    文档里确实存在，但从没用过这个字面词表达"的情况（如"采购方式"字段，
+    文档只写了"进行公开招标"，从没出现过"采购方式"或"招标方式"字样）。
+    生成失败（网络错误/解析失败）时返回空列表，调用方应据此判定为空，
+    不应该因为这一步失败而抛出异常中断整个流程。
+    """
+    field_name = field_def["field_name"]
+    user_prompt = f"""字段名：【{field_name}】
+已尝试过、未命中的关键词：{tried_keywords}
+
+请返回新的同义词/相关关键词列表（JSON 数组）。"""
+
+    try:
+        resp = _get_client().chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": _SYNONYM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        raw = resp.choices[0].message.content.strip()
+        data = _parse_json(raw)
+    except Exception:
+        return []
+
+    if not isinstance(data, list):
+        return []
+    tried_set = set(tried_keywords)
+    return [w.strip() for w in data if isinstance(w, str) and w.strip() and w.strip() not in tried_set]
 
 
 def arbitrate(field_def: dict, candidates: list[dict]) -> dict:
