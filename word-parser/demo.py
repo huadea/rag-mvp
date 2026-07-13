@@ -64,7 +64,7 @@ def simple_parse(path: str):
 # ── 3. 运行 ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    sample = "sample.docx"
-    make_sample_docx(sample)
-    simple_parse(sample)
-    Path(sample).unlink()  # 演示完删除临时文件
+    # sample = "sample.docx"
+    # make_sample_docx(sample)
+    simple_parse("D:\123.docx")
+    # Path(sample).unlink()  # 演示完删除临时文件
